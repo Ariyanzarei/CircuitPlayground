@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>VL53L0X ToF Visualizer</title>
+<style>
+  body { margin: 0; background: #111; color: #eee; font-family: system-ui, sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; padding: 24px 16px; }
+  #mm { font-size: 56px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #status { font-size: 13px; color: #888; margin-bottom: 16px; }
+  canvas { width: 100%; display: block; background: #181818; border-radius: 8px; margin-bottom: 16px; }
+  #beam { height: 80px; }
+  #chart { height: 320px; }
+</style>
+</head>
+<body>
+<main>
+  <div id="mm">-- mm</div>
+  <div id="status">waiting for data…</div>
+  <canvas id="beam"></canvas>   <!-- live distance: sensor on the left, beam to the target -->
+  <canvas id="chart"></canvas>  <!-- distance over the last few seconds -->
+</main>
+<script>
+const MAX_MM = 2000;         // sensor's practical max range
+const HISTORY = 300;         // readings in the chart (~10 s at 30 Hz)
+const history = [];          // newest last; null = out of range
+let latest = null, lastMsg = 0;
+
+// --- Data in: Server-Sent Events from server.py ---------------------------
+new EventSource("/events").onmessage = (e) => {
+  const d = JSON.parse(e.data);
+  latest = d.valid ? Math.min(d.mm, MAX_MM) : null;
+  history.push(latest);
+  if (history.length > HISTORY) history.shift();
+  document.getElementById("mm").textContent = d.valid ? `${d.mm} mm` : "out of range";
+  lastMsg = performance.now();
+};
+
+// Make a canvas sharp on high-DPI screens; returns a 2D context sized in CSS pixels.
+function setup(canvas) {
+  const r = canvas.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  canvas.width = r.width * dpr; canvas.height = r.height * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w: r.width, h: r.height };
+}
+
+// --- Beam view -------------------------------------------------------------
+let shown = 0;               // smoothed value for animation
+function drawBeam() {
+  const { ctx, w, h } = setup(document.getElementById("beam"));
+  const x0 = 30, x1 = w - 20, mid = h / 2;
+  const toX = (mm) => x0 + (mm / MAX_MM) * (x1 - x0);
+
+  // scale ticks every 250 mm
+  ctx.fillStyle = "#666"; ctx.font = "11px system-ui"; ctx.textAlign = "center";
+  for (let mm = 0; mm <= MAX_MM; mm += 250) {
+    ctx.fillRect(toX(mm), h - 18, 1, 6);
+    ctx.fillText(mm, toX(mm), h - 2);
+  }
+  // sensor
+  ctx.fillStyle = "#7b3fb0"; ctx.fillRect(8, mid - 20, 16, 30);
+  if (latest === null) return;
+  shown += (latest - shown) * 0.3;
+  // beam + hit point
+  ctx.strokeStyle = "#ff2030"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x0, mid - 5); ctx.lineTo(toX(shown), mid - 5); ctx.stroke();
+  ctx.fillStyle = "#3fa7ff"; ctx.fillRect(toX(shown), mid - 25, 4, 40);
+}
+
+// --- Time-series chart -----------------------------------------------------
+function drawChart() {
+  const { ctx, w, h } = setup(document.getElementById("chart"));
+  const pad = { l: 50, r: 10, t: 10, b: 10 };
+  const toY = (mm) => pad.t + (1 - mm / MAX_MM) * (h - pad.t - pad.b);
+  const toX = (i) => pad.l + (i / (HISTORY - 1)) * (w - pad.l - pad.r);
+
+  // horizontal grid lines + labels
+  ctx.font = "11px system-ui"; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (let mm = 0; mm <= MAX_MM; mm += 500) {
+    ctx.fillStyle = "#2a2a2a"; ctx.fillRect(pad.l, toY(mm), w - pad.l - pad.r, 1);
+    ctx.fillStyle = "#666"; ctx.fillText(`${mm} mm`, pad.l - 6, toY(mm));
+  }
+  // line; gaps where the reading was out of range. Newest point sits at the right edge.
+  ctx.strokeStyle = "#ffaa33"; ctx.lineWidth = 2; ctx.beginPath();
+  const offset = HISTORY - history.length;
+  let penDown = false;
+  history.forEach((mm, i) => {
+    if (mm === null) { penDown = false; return; }
+    const x = toX(i + offset), y = toY(mm);
+    penDown ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    penDown = true;
+  });
+  ctx.stroke();
+}
+
+function frame() {
+  drawBeam();
+  drawChart();
+  const age = performance.now() - lastMsg;
+  document.getElementById("status").textContent =
+    lastMsg === 0 ? "waiting for data…" : age > 1000 ? "no data (ESP32 offline?)" : "live";
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>
